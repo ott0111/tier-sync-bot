@@ -291,4 +291,7 @@ client.on("guildMemberUpdate", async (oldMember, newMember) => {
     const changed = [...added.values(), ...removed.values()];
     if (changed.length && changed.every(r => tierRoleIds.includes(r.id))) return;
 
-    const hasRoleName = (names) => names.some(n => newMember.roles.cache.some(r => r
+    const hasRoleName = (names) =>
+  names.some(n =>
+    newMember.roles.cache.some(r => r.name === n)
+  );
