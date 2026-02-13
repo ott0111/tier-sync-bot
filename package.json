@@ -1,6 +1,6 @@
 {
   "name": "enterprise-staff-bot",
-  "version": "1.0.0",
+  "version": "1.2.0",
   "main": "index.js",
   "engines": {
     "node": "20.x"
@@ -10,4 +10,3 @@
     "better-sqlite3": "^9.4.0"
   }
 }
-
