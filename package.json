@@ -1,8 +1,13 @@
 {
-  "name": "tier-sync-bot",
+  "name": "enterprise-staff-bot",
   "version": "1.0.0",
   "main": "index.js",
+  "engines": {
+    "node": "20.x"
+  },
   "dependencies": {
-    "discord.js": "^14.14.1"
+    "discord.js": "^14.14.1",
+    "better-sqlite3": "^9.4.0"
   }
 }
+
