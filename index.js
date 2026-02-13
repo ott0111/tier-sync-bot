@@ -1,66 +1,54 @@
 const {
   Client,
   GatewayIntentBits,
-  PermissionsBitField,
-  ChannelType,
   REST,
   Routes,
   SlashCommandBuilder,
   ActionRowBuilder,
-  StringSelectMenuBuilder,
+  StringSelectMenuBuilder
 } = require("discord.js");
 
-const sqlite3 = require("sqlite3").verbose();
+const Database = require("better-sqlite3");
+
+/* ================= ENV ================= */
 
 const TOKEN = process.env.TOKEN;
 const GUILD_ID = process.env.GUILD_ID;
 const MOD_ROLE_ID = process.env.MOD_ROLE_ID;
 const TRIAL_ROLE_ID = process.env.TRIAL_ROLE_ID;
-const QUIZ_LOG_CHANNEL_ID = process.env.QUIZ_LOG_CHANNEL_ID;
 
 if (!TOKEN) throw new Error("Missing TOKEN");
 if (!MOD_ROLE_ID) throw new Error("Missing MOD_ROLE_ID");
 if (!TRIAL_ROLE_ID) throw new Error("Missing TRIAL_ROLE_ID");
 
+/* ================= CLIENT ================= */
+
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMembers,
-    GatewayIntentBits.GuildVoiceStates
+    GatewayIntentBits.GuildMembers
   ]
 });
 
 /* ================= DATABASE ================= */
 
-const db = new sqlite3.Database("./bot.db");
+const db = new Database("bot.db");
 
-db.serialize(() => {
-  db.run(`
-    CREATE TABLE IF NOT EXISTS trial_mod (
-      user_id TEXT PRIMARY KEY,
-      start_ts INTEGER NOT NULL,
-      last_attempt_ts INTEGER,
-      last_score INTEGER
-    )
-  `);
-});
-
-function dbRun(sql, params = []) {
-  return new Promise((res, rej) => {
-    db.run(sql, params, function (err) {
-      if (err) rej(err);
-      else res(this);
-    });
-  });
-}
+db.prepare(`
+  CREATE TABLE IF NOT EXISTS trial_mod (
+    user_id TEXT PRIMARY KEY,
+    start_ts INTEGER NOT NULL,
+    last_attempt_ts INTEGER,
+    last_score INTEGER
+  )
+`).run();
 
 function dbGet(sql, params = []) {
-  return new Promise((res, rej) => {
-    db.get(sql, params, (err, row) => {
-      if (err) rej(err);
-      else res(row);
-    });
-  });
+  return db.prepare(sql).get(...params);
+}
+
+function dbRun(sql, params = []) {
+  return db.prepare(sql).run(...params);
 }
 
 /* ================= TIER SYSTEM ================= */
@@ -85,25 +73,20 @@ client.on("guildMemberUpdate", async (oldMember, newMember) => {
   const hasTrial = newMember.roles.cache.has(TRIAL_ROLE_ID);
 
   if (!hadTrial && hasTrial) {
-    await dbRun(
+    dbRun(
       `INSERT OR REPLACE INTO trial_mod (user_id, start_ts) VALUES (?, ?)`,
       [newMember.id, Date.now()]
     );
   }
 
   if (hadTrial && !hasTrial) {
-    await dbRun(`DELETE FROM trial_mod WHERE user_id = ?`, [newMember.id]);
+    dbRun(`DELETE FROM trial_mod WHERE user_id = ?`, [newMember.id]);
   }
 
-  const changed = [
-    ...newMember.roles.cache.filter(r => !oldMember.roles.cache.has(r.id)).values(),
-    ...oldMember.roles.cache.filter(r => !newMember.roles.cache.has(r.id)).values()
-  ];
-
-  if (changed.length && changed.every(r => tierRoles.includes(r.id))) return;
-
   const hasRoleName = names =>
-    names.some(n => newMember.roles.cache.some(r => r.name === n));
+    names.some(name =>
+      newMember.roles.cache.some(r => r.name === name)
+    );
 
   let correctTier = null;
 
@@ -122,11 +105,6 @@ client.on("guildMemberUpdate", async (oldMember, newMember) => {
   if (correctTier) await newMember.roles.add(correctTier).catch(() => {});
 });
 
-/* ================= PRIVATE VC ================= */
-
-const privateVCs = new Map();
-const execRoles = staffRoles.T4;
-
 /* ================= QUIZ SYSTEM ================= */
 
 const TWO_WEEKS = 14 * 24 * 60 * 60 * 1000;
@@ -134,35 +112,43 @@ const COOLDOWN = 24 * 60 * 60 * 1000;
 
 const QUESTIONS = [
   { q: "What should you do first when a rule is broken?", a: ["Ignore", "Handle calmly", "Argue"], c: 1 },
-  { q: "When escalate?", a: ["Serious issue", "Small typo", "Never"], c: 0 },
-  { q: "How act in conflict?", a: ["Stay calm", "Take sides", "Yell"], c: 0 },
+  { q: "When should you escalate?", a: ["Serious violation", "Small typo", "Never"], c: 0 },
+  { q: "How should staff act in conflicts?", a: ["Stay calm", "Take sides", "React emotionally"], c: 0 },
   { q: "Unsure about punishment?", a: ["Ask higher staff", "Guess", "Ignore"], c: 0 },
-  { q: "Key staff trait?", a: ["Fairness", "Ego", "Power abuse"], c: 0 }
+  { q: "What represents good staff behavior?", a: ["Professionalism", "Ego", "Power abuse"], c: 0 }
 ];
 
 const sessions = new Map();
 
-/* ================= COMMANDS ================= */
+/* ================= READY ================= */
 
 client.once("ready", async () => {
   console.log(`Logged in as ${client.user.tag}`);
 
   const commands = [
-    new SlashCommandBuilder().setName("trialquiz").setDescription("Take Trial Mod quiz")
+    new SlashCommandBuilder()
+      .setName("trialquiz")
+      .setDescription("Take Trial Moderator promotion quiz")
   ].map(c => c.toJSON());
 
   const rest = new REST({ version: "10" }).setToken(TOKEN);
 
   if (GUILD_ID) {
-    await rest.put(Routes.applicationGuildCommands(client.user.id, GUILD_ID), { body: commands });
+    await rest.put(
+      Routes.applicationGuildCommands(client.user.id, GUILD_ID),
+      { body: commands }
+    );
   } else {
-    await rest.put(Routes.applicationCommands(client.user.id), { body: commands });
+    await rest.put(
+      Routes.applicationCommands(client.user.id),
+      { body: commands }
+    );
   }
 
-  console.log("Commands registered.");
+  console.log("Slash commands registered.");
 });
 
-/* ================= INTERACTIONS ================= */
+/* ================= QUIZ COMMAND ================= */
 
 client.on("interactionCreate", async interaction => {
 
@@ -175,7 +161,7 @@ client.on("interactionCreate", async interaction => {
     if (!member.roles.cache.has(TRIAL_ROLE_ID))
       return interaction.reply({ content: "Only Trial Moderators can take this.", ephemeral: true });
 
-    const data = await dbGet(`SELECT * FROM trial_mod WHERE user_id = ?`, [member.id]);
+    const data = dbGet(`SELECT * FROM trial_mod WHERE user_id = ?`, [member.id]);
     if (!data)
       return interaction.reply({ content: "Trial start date not found.", ephemeral: true });
 
@@ -204,10 +190,9 @@ client.on("interactionCreate", async interaction => {
       ephemeral: true
     });
   }
-
 });
 
-/* ================= SELECT MENU HANDLER ================= */
+/* ================= QUIZ SELECT HANDLER ================= */
 
 client.on("interactionCreate", async interaction => {
 
@@ -223,18 +208,18 @@ client.on("interactionCreate", async interaction => {
     return interaction.reply({ content: "Not your quiz.", ephemeral: true });
 
   const session = sessions.get(userId);
-  if (!session) return interaction.reply({ content: "Session expired.", ephemeral: true });
+  if (!session)
+    return interaction.reply({ content: "Session expired.", ephemeral: true });
 
   const answer = parseInt(interaction.values[0]);
   const question = QUESTIONS[index];
 
   if (answer === question.c) session.score++;
-
   session.index++;
 
   if (session.index >= QUESTIONS.length) {
 
-    await dbRun(
+    dbRun(
       `UPDATE trial_mod SET last_attempt_ts = ?, last_score = ? WHERE user_id = ?`,
       [Date.now(), session.score, userId]
     );
