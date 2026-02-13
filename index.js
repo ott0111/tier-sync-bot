@@ -6,10 +6,9 @@ const {
   SlashCommandBuilder,
   ActionRowBuilder,
   StringSelectMenuBuilder,
-  PermissionsBitField
+  PermissionsBitField,
+  ChannelType
 } = require("discord.js");
-
-const Database = require("better-sqlite3");
 
 const TOKEN = process.env.TOKEN;
 const GUILD_ID = process.env.GUILD_ID;
@@ -19,26 +18,13 @@ if (!TOKEN) throw new Error("Missing TOKEN");
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMembers
+    GatewayIntentBits.GuildMembers,
+    GatewayIntentBits.GuildVoiceStates
   ]
 });
 
-/* ================= DATABASE ================= */
+/* ================= TIER IDS ================= */
 
-const db = new Database("bot.db");
-
-db.prepare(`
-  CREATE TABLE IF NOT EXISTS trial_mod (
-    user_id TEXT PRIMARY KEY,
-    start_ts INTEGER NOT NULL,
-    last_attempt_ts INTEGER,
-    last_score INTEGER
-  )
-`).run();
-
-/* ================= TIER CONFIG ================= */
-
-// Your existing Tier IDs
 const T4 = "1471641147314274354";
 const T3 = "1471641311227678832";
 const T2 = "1471643483256262737";
@@ -46,7 +32,6 @@ const T1 = "1471643527640387656";
 
 const tierRoleIds = [T4, T3, T2, T1];
 
-// Structure A mapping
 const staffRoles = {
   T4: ["Executive", "Head Of Operations", "Board Of Directors (BOD)"],
   T3: ["Team Director", "Lead", "Staff Lead", "GFX Lead", "Content Lead"],
@@ -60,12 +45,10 @@ client.on("guildMemberUpdate", async (oldMember, newMember) => {
 
   try {
 
-    // Detect real role changes
     const added = newMember.roles.cache.filter(r => !oldMember.roles.cache.has(r.id));
     const removed = oldMember.roles.cache.filter(r => !newMember.roles.cache.has(r.id));
     const changed = [...added.values(), ...removed.values()];
 
-    // If only tier roles changed, ignore (prevents loop)
     if (changed.length && changed.every(r => tierRoleIds.includes(r.id))) return;
 
     const hasRoleName = (names) =>
@@ -86,13 +69,11 @@ client.on("guildMemberUpdate", async (oldMember, newMember) => {
 
     if (currentTier === correctTier) return;
 
-    if (currentTier) {
+    if (currentTier)
       await newMember.roles.remove(currentTier).catch(() => {});
-    }
 
-    if (correctTier) {
+    if (correctTier)
       await newMember.roles.add(correctTier).catch(() => {});
-    }
 
   } catch (err) {
     console.error("Tier sync error:", err);
@@ -100,17 +81,9 @@ client.on("guildMemberUpdate", async (oldMember, newMember) => {
 
 });
 
-/* ================= QUIZ SYSTEM ================= */
+/* ================= PRIVATE VC SYSTEM ================= */
 
-const QUESTIONS = [
-  { q: "What should you do first when a rule is broken?", a: ["Ignore", "Handle calmly", "Argue"], c: 1 },
-  { q: "When should you escalate?", a: ["Serious violation", "Small typo", "Never"], c: 0 },
-  { q: "How should staff act in conflicts?", a: ["Stay calm", "Take sides", "React emotionally"], c: 0 },
-  { q: "Unsure about punishment?", a: ["Ask higher staff", "Guess", "Ignore"], c: 0 },
-  { q: "What represents good staff behavior?", a: ["Professionalism", "Ego", "Power abuse"], c: 0 }
-];
-
-const sessions = new Map();
+const privateVCs = new Map();
 
 /* ================= READY ================= */
 
@@ -119,9 +92,30 @@ client.once("ready", async () => {
   console.log(`Logged in as ${client.user.tag}`);
 
   const commands = [
+
     new SlashCommandBuilder()
-      .setName("trialquiz")
-      .setDescription("Take Trial Moderator quiz")
+      .setName("setuproles")
+      .setDescription("Create/update staff roles & T1-T4"),
+
+    new SlashCommandBuilder()
+      .setName("createvc")
+      .setDescription("Create private VC (Executive+)"),
+
+    new SlashCommandBuilder()
+      .setName("givekey")
+      .setDescription("Give VC access")
+      .addUserOption(o => o.setName("user").setDescription("User").setRequired(true)),
+
+    new SlashCommandBuilder()
+      .setName("removekey")
+      .setDescription("Remove VC access")
+      .addUserOption(o => o.setName("user").setDescription("User").setRequired(true)),
+
+    new SlashCommandBuilder()
+      .setName("kickfromvc")
+      .setDescription("Kick user from VC")
+      .addUserOption(o => o.setName("user").setDescription("User").setRequired(true))
+
   ].map(c => c.toJSON());
 
   const rest = new REST({ version: "10" }).setToken(TOKEN);
@@ -131,106 +125,183 @@ client.once("ready", async () => {
       Routes.applicationGuildCommands(client.user.id, GUILD_ID),
       { body: commands }
     );
-  } else {
-    await rest.put(
-      Routes.applicationCommands(client.user.id),
-      { body: commands }
-    );
   }
 
   console.log("Commands registered.");
 
 });
 
-/* ================= QUIZ COMMAND ================= */
+/* ================= COMMAND HANDLER ================= */
 
 client.on("interactionCreate", async interaction => {
 
   if (!interaction.isChatInputCommand()) return;
 
-  if (interaction.commandName === "trialquiz") {
+  const member = interaction.member;
+  const guild = interaction.guild;
 
-    sessions.set(interaction.user.id, { index: 0, score: 0 });
+  /* ===== SETUP ROLES ===== */
 
-    const first = QUESTIONS[0];
+  if (interaction.commandName === "setuproles") {
 
-    const menu = new StringSelectMenuBuilder()
-      .setCustomId(`quiz_${interaction.user.id}_0`)
-      .setPlaceholder("Select answer")
-      .addOptions(first.a.map((ans, i) => ({
-        label: ans,
-        value: i.toString()
-      })));
+    if (!member.permissions.has(PermissionsBitField.Flags.Administrator))
+      return interaction.reply({ content: "Admin only.", ephemeral: true });
 
-    const row = new ActionRowBuilder().addComponents(menu);
+    await interaction.reply({ content: "Setting up roles...", ephemeral: true });
 
-    return interaction.reply({
-      content: `**Q1:** ${first.q}`,
-      components: [row],
-      ephemeral: true
+    const createRole = async (name, perms = []) => {
+
+      let role = guild.roles.cache.find(r => r.name === name);
+
+      if (!role) {
+        role = await guild.roles.create({ name });
+      }
+
+      if (perms.length) {
+        const bitfield = new PermissionsBitField(
+          perms.map(p => PermissionsBitField.Flags[p])
+        );
+        await role.setPermissions(bitfield);
+      } else {
+        await role.setPermissions([]);
+      }
+
+      return role;
+    };
+
+    // Tiers
+    await createRole("T4", ["Administrator"]);
+    await createRole("T3", ["ManageRoles", "ManageMessages", "ModerateMembers"]);
+    await createRole("T2", ["ManageMessages", "ModerateMembers"]);
+    await createRole("T1", ["ModerateMembers"]);
+
+    // Display roles (no perms)
+    const displayRoles = [
+      ...staffRoles.T4,
+      ...staffRoles.T3,
+      ...staffRoles.T2,
+      ...staffRoles.T1
+    ];
+
+    for (const name of displayRoles) {
+      await createRole(name, []);
+    }
+
+    return interaction.followUp({ content: "Roles setup complete.", ephemeral: true });
+  }
+
+  /* ===== CREATE VC ===== */
+
+  if (interaction.commandName === "createvc") {
+
+    const isExec = staffRoles.T4.some(r =>
+      member.roles.cache.some(role => role.name === r)
+    );
+
+    if (!isExec)
+      return interaction.reply({ content: "Executive+ only.", ephemeral: true });
+
+    const channel = await guild.channels.create({
+      name: `🔒 Private VC`,
+      type: ChannelType.GuildVoice,
+      permissionOverwrites: [
+        {
+          id: guild.roles.everyone.id,
+          deny: [PermissionsBitField.Flags.Connect]
+        },
+        {
+          id: member.id,
+          allow: [
+            PermissionsBitField.Flags.Connect,
+            PermissionsBitField.Flags.ViewChannel,
+            PermissionsBitField.Flags.Speak
+          ]
+        }
+      ]
     });
+
+    privateVCs.set(channel.id, member.id);
+
+    return interaction.reply({ content: "Private VC created.", ephemeral: true });
+  }
+
+  /* ===== GIVE KEY ===== */
+
+  if (interaction.commandName === "givekey") {
+
+    const channel = member.voice.channel;
+    if (!channel || !privateVCs.has(channel.id))
+      return interaction.reply({ content: "You must be in your private VC.", ephemeral: true });
+
+    if (privateVCs.get(channel.id) !== member.id)
+      return interaction.reply({ content: "Only VC owner can give access.", ephemeral: true });
+
+    const user = interaction.options.getUser("user");
+
+    await channel.permissionOverwrites.edit(user.id, {
+      Connect: true,
+      ViewChannel: true,
+      Speak: true
+    });
+
+    return interaction.reply({ content: "Access granted.", ephemeral: true });
+  }
+
+  /* ===== REMOVE KEY ===== */
+
+  if (interaction.commandName === "removekey") {
+
+    const channel = member.voice.channel;
+    if (!channel || !privateVCs.has(channel.id))
+      return interaction.reply({ content: "You must be in your private VC.", ephemeral: true });
+
+    if (privateVCs.get(channel.id) !== member.id)
+      return interaction.reply({ content: "Only VC owner can remove access.", ephemeral: true });
+
+    const user = interaction.options.getUser("user");
+
+    await channel.permissionOverwrites.delete(user.id);
+
+    return interaction.reply({ content: "Access removed.", ephemeral: true });
+  }
+
+  /* ===== KICK FROM VC ===== */
+
+  if (interaction.commandName === "kickfromvc") {
+
+    const channel = member.voice.channel;
+    if (!channel || !privateVCs.has(channel.id))
+      return interaction.reply({ content: "You must be in your private VC.", ephemeral: true });
+
+    if (privateVCs.get(channel.id) !== member.id)
+      return interaction.reply({ content: "Only VC owner can kick.", ephemeral: true });
+
+    const user = interaction.options.getUser("user");
+    const target = await guild.members.fetch(user.id);
+
+    if (target.voice.channelId === channel.id)
+      await target.voice.disconnect().catch(() => {});
+
+    await channel.permissionOverwrites.delete(user.id);
+
+    return interaction.reply({ content: "User removed from VC.", ephemeral: true });
   }
 
 });
 
-/* ================= QUIZ SELECT HANDLER ================= */
+/* ================= AUTO DELETE EMPTY VC ================= */
 
-client.on("interactionCreate", async interaction => {
+client.on("voiceStateUpdate", async (oldState) => {
 
-  if (!interaction.isStringSelectMenu()) return;
+  const channel = oldState.channel;
 
-  const parts = interaction.customId.split("_");
-  if (parts[0] !== "quiz") return;
-
-  const userId = parts[1];
-  const index = parseInt(parts[2]);
-
-  if (interaction.user.id !== userId)
-    return interaction.reply({ content: "Not your quiz.", ephemeral: true });
-
-  const session = sessions.get(userId);
-  if (!session)
-    return interaction.reply({ content: "Session expired.", ephemeral: true });
-
-  const answer = parseInt(interaction.values[0]);
-  const question = QUESTIONS[index];
-
-  if (answer === question.c) session.score++;
-  session.index++;
-
-  if (session.index >= QUESTIONS.length) {
-
-    sessions.delete(userId);
-
-    if (session.score >= 4) {
-      return interaction.update({
-        content: `Passed! Score: ${session.score}/5`,
-        components: []
-      });
-    } else {
-      return interaction.update({
-        content: `Failed. Score: ${session.score}/5`,
-        components: []
-      });
+  if (channel && privateVCs.has(channel.id)) {
+    if (channel.members.size === 0) {
+      privateVCs.delete(channel.id);
+      await channel.delete().catch(() => {});
     }
   }
 
-  const next = QUESTIONS[session.index];
-
-  const menu = new StringSelectMenuBuilder()
-    .setCustomId(`quiz_${userId}_${session.index}`)
-    .setPlaceholder("Select answer")
-    .addOptions(next.a.map((ans, i) => ({
-      label: ans,
-      value: i.toString()
-    })));
-
-  const row = new ActionRowBuilder().addComponents(menu);
-
-  return interaction.update({
-    content: `**Q${session.index + 1}:** ${next.q}`,
-    components: [row]
-  });
 });
 
 client.login(TOKEN);
